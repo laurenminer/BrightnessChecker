@@ -1,7 +1,15 @@
 [project]
-name = "brightnesschecker"
+name = "brightness-checker"
 version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.11"
-dependencies = []
+description = "Brightness analysis for immobilized sensor animals"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "seaborn",
+    "tifffile",
+    "nd2",
+    "xarray",
+    "tqdm",
+]
