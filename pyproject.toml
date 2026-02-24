@@ -12,4 +12,5 @@ dependencies = [
     "nd2",
     "xarray",
     "tqdm",
+    "scipy",
 ]
