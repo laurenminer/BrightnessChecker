@@ -9,9 +9,10 @@ This script:
 3. Computes MIP for each z-stack
 4. Calculates global background (median across all MIPs)
 5. Subtracts background from each MIP
-6. Computes top 5% brightest pixels for each MIP
-7. Generates time-series plots of brightness vs time
-8. Saves results as PNG plots and CSV
+6. Applies exponential bleach correction
+7. Computes top 5% brightest pixels for each MIP
+8. Generates time-series plots of brightness vs time
+9. Saves results as PNG plots and CSV
 """
 
 import argparse
@@ -22,6 +23,7 @@ import matplotlib.pyplot as plt
 import tifffile
 import nd2
 from tqdm.auto import tqdm
+from scipy.optimize import curve_fit
 
 
 # ============================================================================
@@ -172,6 +174,101 @@ def subtract_background(mips: np.ndarray, bg_val: float) -> np.ndarray:
 
 
 # ============================================================================
+# BLEACH CORRECTION
+# ============================================================================
+
+def exponential_decay(t, I0, k):
+    """
+    Exponential decay model: I(t) = I0 * exp(-k * t)
+    
+    Args:
+        t: Time (z-stack index)
+        I0: Initial intensity
+        k: Decay constant
+    
+    Returns:
+        Intensity at time t
+    """
+    return I0 * np.exp(-k * t)
+
+
+def fit_exponential_bleach(
+    time_indices: np.ndarray,
+    brightness_values: np.ndarray
+) -> tuple[float, float]:
+    """
+    Fit exponential decay to brightness data.
+    
+    Args:
+        time_indices: Array of time points (z-stack indices)
+        brightness_values: Brightness at each time point
+    
+    Returns:
+        (I0, k) - fitted parameters for exponential_decay()
+    """
+    # Initial guess
+    I0_guess = brightness_values[0]
+    k_guess = 0.01
+    
+    try:
+        # Fit exponential decay
+        popt, _ = curve_fit(
+            exponential_decay,
+            time_indices,
+            brightness_values,
+            p0=[I0_guess, k_guess],
+            maxfev=5000
+        )
+        I0, k = popt
+        return I0, k
+    except Exception as e:
+        print(f"⚠️  Warning: Failed to fit exponential decay: {e}")
+        print(f"   Using linear fit instead.\n")
+        # Fall back to linear fit
+        coeffs = np.polyfit(time_indices, brightness_values, 1)
+        return brightness_values[0], 0.001
+
+
+def apply_bleach_correction(
+    brightness_mean: np.ndarray,
+    brightness_median: np.ndarray,
+    time_indices: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Apply exponential bleach correction to brightness data.
+    
+    Args:
+        brightness_mean: Original mean brightness
+        brightness_median: Original median brightness
+        time_indices: Time points (z-stack indices)
+    
+    Returns:
+        (corrected_mean, corrected_median, fitted_curve, I0_k_tuple)
+    """
+    print("Fitting exponential bleach correction...")
+    
+    # Fit to mean brightness (more stable)
+    I0, k = fit_exponential_bleach(time_indices, brightness_mean)
+    
+    print(f"  Fitted exponential decay:")
+    print(f"    I₀ = {I0:.2f}")
+    print(f"    k = {k:.6f}")
+    print(f"    Half-life ≈ {np.log(2) / k:.1f} z-stacks\n")
+    
+    # Compute fitted decay curve
+    fitted_curve = exponential_decay(time_indices, I0, k)
+    
+    # Correct by dividing by fitted curve
+    print("Applying bleach correction...")
+    corrected_mean = brightness_mean / fitted_curve
+    corrected_median = brightness_median / fitted_curve
+    
+    print(f"✓ Bleach correction applied\n")
+    
+    return corrected_mean, corrected_median, fitted_curve, (I0, k)
+
+
+# ============================================================================
 # BRIGHTNESS METRICS
 # ============================================================================
 
@@ -228,15 +325,19 @@ def save_results_csv(
     time_indices: np.ndarray,
     mean_brightness: np.ndarray,
     median_brightness: np.ndarray,
+    corrected_mean: np.ndarray,
+    corrected_median: np.ndarray,
     output_folder: Path
 ) -> None:
     """
-    Save results as CSV with 3 columns: x-values, y-mean, y-median.
+    Save results as CSV with 5 columns: time, mean, median, corrected_mean, corrected_median.
     """
     df_results = pd.DataFrame({
         "z_stack_index": time_indices.astype(int),
-        "brightness_mean": mean_brightness,
-        "brightness_median": median_brightness,
+        "brightness_mean_raw": mean_brightness,
+        "brightness_median_raw": median_brightness,
+        "brightness_mean_corrected": corrected_mean,
+        "brightness_median_corrected": corrected_median,
     })
     
     csv_path = output_folder / "brightness_timeseries.csv"
@@ -248,50 +349,96 @@ def save_results_csv(
 # PLOTTING
 # ============================================================================
 
-def plot_brightness_time_series(
+def plot_bleach_correction(
     time_indices: np.ndarray,
     mean_brightness: np.ndarray,
-    median_brightness: np.ndarray,
+    fitted_curve: np.ndarray,
+    corrected_mean: np.ndarray,
     output_folder: Path
 ) -> None:
-    """Create two plots: mean and median brightness over time."""
+    """Plot raw data, bleach correction fit, and corrected data."""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
     
-    # --- Plot 1: Mean brightness ---
+    # --- Top panel: Raw data with fitted curve ---
+    ax1.plot(
+        time_indices, mean_brightness,
+        marker='o', linewidth=2, markersize=6,
+        color='#1f77b4', label='Raw data', alpha=0.7
+    )
+    ax1.plot(
+        time_indices, fitted_curve,
+        linewidth=3, color='#d62728',
+        label='Exponential fit', linestyle='--'
+    )
+    ax1.set_xlabel("Z-Stack Index (Time)", fontsize=12)
+    ax1.set_ylabel("Brightness (Mean, top 5%)", fontsize=12)
+    ax1.set_title("Bleach Correction: Raw Data and Exponential Fit", fontsize=14)
+    ax1.legend(fontsize=11)
+    ax1.grid(alpha=0.3)
+    
+    # --- Bottom panel: Corrected data ---
+    ax2.plot(
+        time_indices, corrected_mean,
+        marker='s', linewidth=2, markersize=6,
+        color='#2ca02c', label='Corrected data'
+    )
+    ax2.set_xlabel("Z-Stack Index (Time)", fontsize=12)
+    ax2.set_ylabel("Brightness (Mean, top 5%, corrected)", fontsize=12)
+    ax2.set_title("Bleach-Corrected Brightness Over Time", fontsize=14)
+    ax2.legend(fontsize=11)
+    ax2.grid(alpha=0.3)
+    
+    plt.tight_layout()
+    out_path = output_folder / "bleach_correction.png"
+    plt.savefig(out_path, dpi=150, bbox_inches='tight')
+    print(f"✓ Saved: bleach_correction.png")
+    plt.close()
+
+
+def plot_brightness_time_series(
+    time_indices: np.ndarray,
+    corrected_mean: np.ndarray,
+    corrected_median: np.ndarray,
+    output_folder: Path
+) -> None:
+    """Create two plots: corrected mean and median brightness over time."""
+    
+    # --- Plot 1: Mean brightness (corrected) ---
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(
-        time_indices, mean_brightness,
+        time_indices, corrected_mean,
         marker='o', linewidth=2, markersize=8,
-        color='#1f77b4', label='Mean (top 5%)'
+        color='#1f77b4', label='Mean (top 5%, corrected)'
     )
     ax.set_xlabel("Z-Stack Index (Time)", fontsize=12)
-    ax.set_ylabel("Brightness (Mean)", fontsize=12)
-    ax.set_title("Brightness Over Time (Mean of Top 5% Pixels)", fontsize=14)
+    ax.set_ylabel("Brightness (Mean, corrected)", fontsize=12)
+    ax.set_title("Bleach-Corrected Brightness Over Time (Mean)", fontsize=14)
     ax.grid(alpha=0.3)
     ax.legend(fontsize=11)
     plt.tight_layout()
     
-    out_path = output_folder / "brightness_mean_timeseries.png"
+    out_path = output_folder / "brightness_mean_timeseries_corrected.png"
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    print(f"✓ Saved: brightness_mean_timeseries.png")
+    print(f"✓ Saved: brightness_mean_timeseries_corrected.png")
     plt.close()
     
-    # --- Plot 2: Median brightness ---
+    # --- Plot 2: Median brightness (corrected) ---
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(
-        time_indices, median_brightness,
+        time_indices, corrected_median,
         marker='s', linewidth=2, markersize=8,
-        color='#ff7f0e', label='Median (top 5%)'
+        color='#ff7f0e', label='Median (top 5%, corrected)'
     )
     ax.set_xlabel("Z-Stack Index (Time)", fontsize=12)
-    ax.set_ylabel("Brightness (Median)", fontsize=12)
-    ax.set_title("Brightness Over Time (Median of Top 5% Pixels)", fontsize=14)
+    ax.set_ylabel("Brightness (Median, corrected)", fontsize=12)
+    ax.set_title("Bleach-Corrected Brightness Over Time (Median)", fontsize=14)
     ax.grid(alpha=0.3)
     ax.legend(fontsize=11)
     plt.tight_layout()
     
-    out_path = output_folder / "brightness_median_timeseries.png"
+    out_path = output_folder / "brightness_median_timeseries_corrected.png"
     plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    print(f"✓ Saved: brightness_median_timeseries.png\n")
+    print(f"✓ Saved: brightness_median_timeseries_corrected.png\n")
     plt.close()
 
 
@@ -326,6 +473,7 @@ def main(
     
     print("=" * 70)
     print("BRIGHTNESS CHECKER TIME-SERIES ANALYSIS")
+    print("(with Exponential Bleach Correction)")
     print("=" * 70 + "\n")
     
     # --- Load frames ---
@@ -350,19 +498,28 @@ def main(
     # --- Subtract background ---
     mips_bgsub = subtract_background(mips, bg_val)
     
-    # --- Compute brightness metrics ---
+    # --- Compute brightness metrics (BEFORE bleach correction) ---
     mean_brightness, median_brightness = compute_top_percent_brightness(mips_bgsub, percentile=95)
+    
+    # --- Apply bleach correction ---
+    time_indices = np.arange(len(mips))
+    corrected_mean, corrected_median, fitted_curve, (I0, k) = apply_bleach_correction(
+        mean_brightness, median_brightness, time_indices
+    )
     
     # --- Save MIPs ---
     save_mips(mips_bgsub, output_folder)
     
     # --- Generate plots ---
-    time_indices = np.arange(len(mips))
     print("Generating plots...")
-    plot_brightness_time_series(time_indices, mean_brightness, median_brightness, output_folder)
+    plot_bleach_correction(time_indices, mean_brightness, fitted_curve, corrected_mean, output_folder)
+    plot_brightness_time_series(time_indices, corrected_mean, corrected_median, output_folder)
     
     # --- Save CSV ---
-    save_results_csv(time_indices, mean_brightness, median_brightness, output_folder)
+    save_results_csv(
+        time_indices, mean_brightness, median_brightness,
+        corrected_mean, corrected_median, output_folder
+    )
     
     print("=" * 70)
     print("✓ ANALYSIS COMPLETE")
@@ -376,11 +533,11 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Analyze brightness changes over time in z-stack time-series.",
+        description="Analyze brightness changes over time in z-stack time-series with bleach correction.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # From ND2 file (all frames)
+  # From ND2 file
   uv run brightness_checker_time.py /path/to/timeseries.nd2
   
   # From TIFF folder
