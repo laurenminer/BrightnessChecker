@@ -232,30 +232,39 @@ def fit_exponential_bleach(
 def apply_bleach_correction(
     brightness_mean: np.ndarray,
     brightness_median: np.ndarray,
-    time_indices: np.ndarray
+    time_indices: np.ndarray,
+    fit_window: int = 50
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Apply exponential bleach correction to brightness data.
+    
+    Fits exponential only to early time points where bleaching is active,
+    then extends fit to entire time series.
     
     Args:
         brightness_mean: Original mean brightness
         brightness_median: Original median brightness
         time_indices: Time points (z-stack indices)
+        fit_window: Only fit first N time points (default 50)
     
     Returns:
-        (corrected_mean, corrected_median, fitted_curve, I0_k_tuple)
+        (corrected_mean, corrected_median, fitted_curve, time_indices)
     """
     print("Fitting exponential bleach correction...")
     
-    # Fit to mean brightness (more stable)
-    I0, k = fit_exponential_bleach(time_indices, brightness_mean)
+    # Fit only to early time points where bleaching is active
+    fit_indices = time_indices[:fit_window]
+    fit_values = brightness_mean[:fit_window]
     
+    I0, k = fit_exponential_bleach(fit_indices, fit_values)
+    
+    print(f"  Fitted to first {fit_window} z-stacks")
     print(f"  Fitted exponential decay:")
     print(f"    I₀ = {I0:.2f}")
     print(f"    k = {k:.6f}")
     print(f"    Half-life ≈ {np.log(2) / k:.1f} z-stacks\n")
     
-    # Compute fitted decay curve
+    # Compute fitted decay curve for ALL time points
     fitted_curve = exponential_decay(time_indices, I0, k)
     
     # Correct by dividing by fitted curve
@@ -265,8 +274,7 @@ def apply_bleach_correction(
     
     print(f"✓ Bleach correction applied\n")
     
-    return corrected_mean, corrected_median, fitted_curve, (I0, k)
-
+    return corrected_mean, corrected_median, fitted_curve, time_indices
 
 # ============================================================================
 # BRIGHTNESS METRICS
@@ -503,7 +511,7 @@ def main(
     
     # --- Apply bleach correction ---
     time_indices = np.arange(len(mips))
-    corrected_mean, corrected_median, fitted_curve, (I0, k) = apply_bleach_correction(
+    corrected_mean, corrected_median, fitted_curve, _ = apply_bleach_correction(
         mean_brightness, median_brightness, time_indices
     )
     
